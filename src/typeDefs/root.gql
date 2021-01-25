@@ -1,0 +1,13 @@
+# auth
+directive @isAuthenticated on FIELD | FIELD_DEFINITION
+
+scalar Date
+scalar Upload
+scalar JSON
+scalar JSONObject
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

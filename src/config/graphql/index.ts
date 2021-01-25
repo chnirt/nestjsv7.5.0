@@ -1,55 +1,106 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { GqlOptionsFactory, GqlModuleOptions } from '@nestjs/graphql';
-import { AuthenticationError } from 'apollo-server-core';
 import { MemcachedCache } from 'apollo-server-cache-memcached';
-import { GraphQLError } from 'graphql';
-import { GraphQLResponse } from 'apollo-server-types';
 import { PubSub } from 'graphql-subscriptions';
-import * as depthLimit from 'graphql-depth-limit';
-import * as chalk from 'chalk';
+// import { join } from 'path'
+import { GraphQLExtension, AuthenticationError } from 'apollo-server-core';
+import { MockList } from 'graphql-tools';
 import GraphQLJSON, { GraphQLJSONObject } from 'graphql-type-json';
-import { MockList } from 'apollo-server-express';
+import * as depthLimit from 'graphql-depth-limit';
+// import { fileLoader, mergeTypes } from 'merge-graphql-schemas'
+// import { buildFederatedSchema } from '@apollo/federation'
+// import { ApolloGateway } from '@apollo/gateway'
+import { getMongoRepository } from 'typeorm';
+import chalk from 'chalk';
+// import responseCachePlugin from 'apollo-server-plugin-response-cache'
+
+import schemaDirectives from './schemaDirectives';
+import directiveResolvers from './directiveResolvers';
+import { verifyToken } from '@auth';
+import { User } from '@entities';
+// import { logger } from '../../common'
+
 import {
   NODE_ENV,
+  PRIMARY_COLOR,
   END_POINT,
   FE_URL,
-  ACCESS_TOKEN,
   GRAPHQL_DEPTH_LIMIT,
-  PRIMARY_COLOR,
-} from '../../environments';
-import schemaDirectives from './schemaDirectives';
-import { verifyToken } from '../../auth';
+  ACCESS_TOKEN,
+} from '@environments';
 
-const pubSub = new PubSub();
+// const gateway = new ApolloGateway({
+// 	serviceList: [
+// 		{ name: 'accounts', url: 'http://localhost:11041/graphql' },
+// 		{ name: 'reviews', url: 'http://localhost:14042/graphql' },
+// 		{ name: 'products', url: 'http://localhost:11043/graphql' },
+// 		{ name: 'inventory', url: 'http://localhost:11044/graphql' }
+// 	]
+// })
+
+const pubsub = new PubSub();
+class MyErrorTrackingExtension extends GraphQLExtension {
+  willSendResponse(o) {
+    const { context, graphqlResponse } = o;
+
+    context.trackErrors(graphqlResponse.errors);
+
+    return o;
+  }
+  // Other lifecycle methods include
+  // requestDidStart
+  // parsingDidStart
+  // validationDidStart
+  // executionDidStart
+  // willSendResponse
+}
 
 @Injectable()
 export class GraphqlService implements GqlOptionsFactory {
   async createGqlOptions(): Promise<GqlModuleOptions> {
+    // const { schema, executor } = await gateway.load()
+    // const typeDefs = mergeTypes(fileLoader(`./**/*.graphql`), {
+    // 	all: true
+    // })
+
+    // console.log(typeDefs)
     return {
-      typePaths: ['./**/*.(gql|graphql)'],
+      // schema,
+      // executor,
+      // schema: buildFederatedSchema([
+      // 	{
+      // 		typeDefs,
+      // 		resolvers: {
+      // 			JSON: GraphQLJSON,
+      // 			JSONObject: GraphQLJSONObject
+      // 		}
+      // 	}
+      // ]),
+      typePaths: ['./**/*.graphql'],
       resolvers: {
         JSON: GraphQLJSON,
         JSONObject: GraphQLJSONObject,
       },
+      extensions: [() => new MyErrorTrackingExtension()],
       mocks: NODE_ENV === 'testing' && {
-        String: (): string => 'Chnirt',
-        Query: (): any => ({
-          users: (): any => new MockList([2, 6]),
+        // String: () => 'Chnirt',
+        Query: () => ({
+          users: () => new MockList([2, 6]),
         }),
       },
       resolverValidationOptions: {
         requireResolversForResolveType: false,
       },
-      path: `/${END_POINT}`,
+      path: `/${END_POINT!}`,
       cors:
         NODE_ENV === 'production'
           ? {
-              origin: FE_URL,
+              origin: FE_URL!,
               credentials: true, // <-- REQUIRED backend setting
             }
           : true,
       bodyParserConfig: { limit: '50mb' },
-      onHealthCheck: (): Promise<any> => {
+      onHealthCheck: () => {
         return new Promise((resolve, reject) => {
           // Replace the `true` in this conditional with more specific checks!
           if (true) {
@@ -59,17 +110,22 @@ export class GraphqlService implements GqlOptionsFactory {
           }
         });
       },
+      // definitions: {
+      // 	path: join(process.cwd(), 'src/graphql.ts'),
+      // 	outputAs: 'class'
+      // },
       schemaDirectives,
+      directiveResolvers,
       validationRules: [
         depthLimit(
-          GRAPHQL_DEPTH_LIMIT,
+          GRAPHQL_DEPTH_LIMIT!,
           { ignore: [/_trusted$/, 'idontcare'] },
           depths => {
-            if (depths[''] === GRAPHQL_DEPTH_LIMIT - 1) {
+            if (depths[''] === GRAPHQL_DEPTH_LIMIT! - 1) {
               Logger.warn(
                 `⚠️  You can only descend ${chalk
-                  .hex(PRIMARY_COLOR)
-                  .bold(GRAPHQL_DEPTH_LIMIT)} levels.`,
+                  .hex(PRIMARY_COLOR!)
+                  .bold(`${GRAPHQL_DEPTH_LIMIT!}`)} levels.`,
                 'GraphQL',
                 false,
               );
@@ -91,64 +147,99 @@ export class GraphqlService implements GqlOptionsFactory {
           'tracing.hideTracingResponse': false,
         },
         // tabs: [
-        //   {
-        //     name: 'default',
-        //     endpoint: END_POINT,
-        //     query: { hello },
-        //   },
-        // ],
+        // 	{
+        // 		endpoint: END_POINT,
+        // 		query: '{ hello }'
+        // 	}
+        // ]
       },
-      tracing: NODE_ENV === 'development',
+      tracing: NODE_ENV !== 'production',
       cacheControl: NODE_ENV === 'production' && {
         defaultMaxAge: 5,
         stripFormattedExtensions: false,
         calculateHttpHeaders: false,
       },
-      context: async ({ req, res, connection }): Promise<any> => {
+      // plugins: [responseCachePlugin()],
+      context: async ({ req, res, connection }) => {
+        if (connection) {
+          const { currentUser } = connection.context;
+
+          return {
+            pubsub,
+            currentUser,
+          };
+        }
+
         let currentUser;
 
-        if (connection) {
-          currentUser = connection.context.currentUser;
-        } else {
-          // req.headers.access-token
-          const token = req.headers[ACCESS_TOKEN] || '';
+        // console.log(ACCESS_TOKEN, req.headers)
 
-          if (token) {
-            currentUser = await verifyToken(token, 'accessToken');
-          }
+        const token = req.headers[ACCESS_TOKEN!] || '';
+
+        // console.log('token', token)
+        if (token) {
+          currentUser = await verifyToken(token, 'accessToken');
         }
+
+        // console.log(currentUser);
 
         return {
           req,
           res,
-          pubSub,
+          pubsub,
           currentUser,
+          trackErrors(errors) {
+            // Track the errors
+            // console.log(errors)
+          },
         };
       },
-      formatError: (error: GraphQLError): any => ({
-        message: error.message,
-        code: error.extensions && error.extensions.code,
-        locations: error.locations,
-        path: error.path,
-      }),
-      formatResponse: (response: GraphQLResponse): any => response,
+      formatError: error => {
+        // console.log(error)
+        // if (error.originalError instanceof AuthenticationError) {
+        // 	return new Error('Different authentication error message!')
+        // }
+
+        // if (error.originalError instanceof ForbiddenError) {
+        // 	return new Error('Different forbidden error message!')
+        // }
+
+        // logger.error(error.message)
+
+        return {
+          message: error.message,
+          code: error.extensions && error.extensions.code,
+          locations: error.locations,
+          path: error.path,
+        };
+      },
+      formatResponse: response => {
+        // console.log(response)
+        return response;
+      },
       subscriptions: {
-        path: `/${END_POINT}`,
+        path: `/${END_POINT!}`,
         keepAlive: 1000,
-        onConnect: async (connectionParams: unknown): Promise<any> => {
+        onConnect: async (connectionParams, webSocket, context) => {
           NODE_ENV !== 'production' &&
             Logger.debug(`🔗  Connected to websocket`, 'GraphQL');
 
-          const token = connectionParams[ACCESS_TOKEN];
+          let currentUser;
+
+          const token = connectionParams[ACCESS_TOKEN!];
 
           if (token) {
-            const currentUser = await verifyToken(token, 'accessToken');
+            currentUser = await verifyToken(token, 'accessToken');
 
-            if (!currentUser) {
-              throw new AuthenticationError(
-                'Authentication token is invalid, please try again.',
-              );
-            }
+            await getMongoRepository(User).updateOne(
+              { _id: currentUser._id },
+              {
+                $set: { isOnline: true },
+              },
+              {
+                upsert: true,
+              },
+            );
 
             return { currentUser };
           }
@@ -157,9 +248,22 @@ export class GraphqlService implements GqlOptionsFactory {
             'Authentication token is invalid, please try again.',
           );
         },
-        onDisconnect: (): any => {
+        onDisconnect: async (webSocket, context) => {
           NODE_ENV !== 'production' &&
-            Logger.error('❌  Disconnected to websocket', '', 'GraphQL', false);
+            Logger.error(`❌  Disconnected to websocket`, '', 'GraphQL', false);
+
+          const { initPromise } = context;
+          const { currentUser } = await initPromise;
+
+          await getMongoRepository(User).updateOne(
+            { _id: currentUser._id },
+            {
+              $set: { isOnline: false },
+            },
+            {
+              upsert: true,
+            },
+          );
         },
       },
       persistedQueries: {

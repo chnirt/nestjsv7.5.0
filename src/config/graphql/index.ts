@@ -110,6 +110,7 @@ export class GraphqlService implements GqlOptionsFactory {
         if (connection) {
           currentUser = connection.context.currentUser;
         } else {
+          // req.headers.access-token
           const token = req.headers[ACCESS_TOKEN] || '';
 
           if (token) {
